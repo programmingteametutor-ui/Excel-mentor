@@ -1,0 +1,47 @@
+{
+  "name": "excelmentor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ExcelMentor — an AI Excel tutor (Google Gemini) that teaches through business problems or your own take-home assessment, in nine gated stages",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/build.mjs --serve",
+    "build": "node scripts/build.mjs",
+    "build:single": "node scripts/build.mjs --single",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test \"tests/**/*.test.ts\"",
+    "test:e2e": "node tests/e2e/smoke.mjs",
+    "test:e2e:features": "node tests/e2e/features.mjs",
+    "serve": "node tests/e2e/serve.mjs dist 4173",
+    "bench": "node --import tsx scripts/bench.ts",
+    "compat": "node --import tsx scripts/gen-compat.ts",
+    "test:e2e:mentor": "node tests/e2e/mentor.mjs",
+    "test:e2e:addins": "node tests/e2e/addins.mjs"
+  },
+  "dependencies": {
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "d3-scale": "^4.0.2",
+    "d3-shape": "^3.2.0",
+    "hyperformula": "^3.0.0",
+    "jszip": "^3.10.1",
+    "papaparse": "^5.4.1",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwind-merge": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/d3-scale": "^4.0.9",
+    "@types/d3-shape": "^3.1.7",
+    "@types/node": "^22.0.0",
+    "@types/papaparse": "^5.3.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "esbuild": "^0.25.0",
+    "tailwindcss": "^4.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
