@@ -31,8 +31,15 @@ export type Fetcher = typeof fetch
 
 /** Which structured-output request shape the endpoint accepted last (remembered per page load). */
 let schemaVariant = 0
-/** A model used instead of the chosen one after it stayed overloaded (per page load). */
-const busyFallback = new Map<string, string>()
+/** A model used instead of the chosen one after it stayed overloaded (per page load, forgotten after a while so the chosen model gets another chance). */
+const FALLBACK_TTL_MS = 10 * 60_000
+const busyFallback = new Map<string, { model: string; until: number }>()
+const activeFallback = (chosen: string): string | undefined => {
+  const f = busyFallback.get(chosen)
+  if (!f) return undefined
+  if (f.until < Date.now()) return busyFallback.delete(chosen), undefined
+  return f.model
+}
 
 const sleep = (ms: number, signal?: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
@@ -60,7 +67,7 @@ export class GeminiClient {
 
   /** The model requests go to: the chosen one, or a stand-in while it is overloaded. */
   get model(): string {
-    return busyFallback.get(this.chosenModel) ?? this.chosenModel
+    return activeFallback(this.chosenModel) ?? this.chosenModel
   }
 
   private endpoint(path: string): { url: string; headers: Record<string, string> } {
@@ -115,29 +122,59 @@ export class GeminiClient {
     return json
   }
 
-  /** Plain text (or JSON text when a schema is given). Overload errors are retried with waits, then once on another model. */
-  async generate(o: GenerateOptions): Promise<string> {
-    let triedFallback = false
+  /** Retries one model while it is overloaded; throws the last 'busy' error once the waits run out. */
+  private async generateWithRetries(o: GenerateOptions, delays: number[]): Promise<string> {
     for (let attempt = 0; ; attempt++) {
       try {
         return await this.generateOnce(o)
       } catch (e) {
-        if (!(e instanceof GeminiError) || e.kind !== 'busy' || o.signal?.aborted) throw e
-        if (attempt < this.retryDelays.length) {
-          await sleep(this.retryDelays[attempt], o.signal)
-          continue
+        if (!(e instanceof GeminiError) || e.kind !== 'busy' || o.signal?.aborted || attempt >= delays.length) throw e
+        await sleep(delays[attempt], o.signal)
+      }
+    }
+  }
+
+  /** Other models to try while the chosen one is overloaded: stable "-latest" aliases first, then older/stable releases (the newest models are the ones that get overloaded), lite models last. */
+  private async fallbackCandidates(): Promise<string[]> {
+    const skip = new Set([this.chosenModel, this.model])
+    let listed: string[] = []
+    if (this.settings.connection === 'key') listed = await this.listModels().catch(() => [] as string[])
+    const usable = listed.filter((m) => !skip.has(m) && /^gemini-/.test(m) && !/image|tts|audio|live|embed|vision|exp|learnlm|nano|robotics|computer-use/i.test(m))
+    const flash = (m: string) => /flash/.test(m) && !/lite/.test(m)
+    const version = (m: string) => Number(/gemini-(\d+(?:\.\d+)?)/.exec(m)?.[1] ?? 0)
+    const aliases = usable.filter((m) => flash(m) && /-latest$/.test(m))
+    const stable = usable.filter((m) => flash(m) && !/-latest$/.test(m) && !/preview/.test(m)).sort((a, b) => version(b) - version(a))
+    const previews = usable.filter((m) => flash(m) && /preview/.test(m) && !/-latest$/.test(m)).sort((a, b) => version(b) - version(a))
+    const lite = usable.filter((m) => /lite/.test(m)).sort((a, b) => version(b) - version(a))
+    const out = [...aliases, ...stable, ...previews, ...lite]
+    // a proxy (or a failed model list) can't tell us what exists: Google's own alias is always worth one try
+    if (!out.length && !skip.has('gemini-flash-latest')) out.push('gemini-flash-latest')
+    return [...new Set(out)].slice(0, 4)
+  }
+
+  /** Plain text (or JSON text when a schema is given). Overload errors are retried with waits, then other models are tried one after another. */
+  async generate(o: GenerateOptions): Promise<string> {
+    const chosen = this.chosenModel
+    let candidates: string[] | null = null
+    let lastBusy: GeminiError | null = null
+    let onFallback = this.model !== chosen
+    for (;;) {
+      try {
+        // the chosen model gets the full set of waits; a stand-in only one quick retry so we move on fast
+        return await this.generateWithRetries(o, onFallback ? this.retryDelays.slice(0, 1) : this.retryDelays)
+      } catch (e) {
+        if (!(e instanceof GeminiError) || o.signal?.aborted) throw e
+        // a stand-in that doesn't exist for this key is skipped just like an overloaded one
+        if (e.kind === 'busy') lastBusy = e
+        else if (!(e.kind === 'model' && onFallback)) throw e
+        candidates ??= await this.fallbackCandidates()
+        const next = candidates.shift()
+        if (!next) {
+          busyFallback.delete(chosen)
+          throw new GeminiError(`Gemini is overloaded right now (high demand on ${chosen}${onFallback ? ' and the backup models' : ''}). This is on Google's side and usually passes within a few minutes — try again shortly, or pick an older model (for example gemini-flash-latest) in Mentor settings.`, lastBusy?.status ?? e.status, 'busy')
         }
-        // still overloaded: switch to the best other model this key can use, once
-        if (!triedFallback && this.settings.connection === 'key') {
-          triedFallback = true
-          const other = pickModel((await this.listModels().catch(() => [] as string[])).filter((m) => m !== this.model))
-          if (other) {
-            busyFallback.set(this.chosenModel, other)
-            attempt = this.retryDelays.length - 2
-            continue
-          }
-        }
-        throw new GeminiError(`Gemini is overloaded right now (high demand on ${this.model}). This is on Google's side and usually passes within a few minutes — try again shortly, or pick another model in Mentor settings.`, e.status, 'busy')
+        busyFallback.set(chosen, { model: next, until: Date.now() + FALLBACK_TTL_MS })
+        onFallback = true
       }
     }
   }
