@@ -311,3 +311,31 @@ test('an overloaded model (503) is retried, then another model is tried', async 
   const p = new GeminiClient({ connection: 'proxy', apiKey: '', proxyUrl: 'https://p', model: 'x-busy' }, (async () => new Response(JSON.stringify({ error: { message: 'high demand' } }), { status: 503 })) as unknown as typeof fetch, [0])
   await assert.rejects(p.generate({ system: 's', turns: [{ role: 'user', text: 'hi' }] }), /overloaded right now/)
 })
+
+test('when the newest models are all overloaded, a stable alias is tried before them and the stand-in is remembered', async () => {
+  const urls: string[] = []
+  const fetcher = (async (url: string) => {
+    urls.push(url)
+    if (url.includes('models?')) return new Response(JSON.stringify({ models: ['gemini-9.9-flash', 'gemini-9.8-flash', 'gemini-flash-latest', 'gemini-2.5-flash'].map((n) => ({ name: `models/${n}`, supportedGenerationMethods: ['generateContent'] })) }), { status: 200 })
+    if (/gemini-9\.\d-flash:/.test(url)) return new Response(JSON.stringify({ error: { message: 'This model is currently experiencing high demand.' } }), { status: 503 })
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'OK' }] } }] }), { status: 200 })
+  }) as unknown as typeof fetch
+  const c = new GeminiClient({ connection: 'key', apiKey: 'k', proxyUrl: '', model: 'gemini-9.9-flash' }, fetcher, [0, 0])
+  assert.equal(await c.generate({ system: 's', turns: [{ role: 'user', text: 'hi' }] }), 'OK')
+  assert.equal(c.model, 'gemini-flash-latest', 'the stable alias, not the next-newest (also overloaded) model')
+  assert.ok(!urls.some((u) => u.includes('gemini-9.8-flash')))
+  const before = urls.length
+  await c.generate({ system: 's', turns: [{ role: 'user', text: 'again' }] })
+  assert.equal(urls.length, before + 1, 'later calls go straight to the stand-in')
+})
+
+test('if the first stand-in is also overloaded, the next one is tried', async () => {
+  const fetcher = (async (url: string) => {
+    if (url.includes('models?')) return new Response(JSON.stringify({ models: ['gemini-8.1-flash', 'gemini-flash-latest', 'gemini-2.5-flash'].map((n) => ({ name: `models/${n}`, supportedGenerationMethods: ['generateContent'] })) }), { status: 200 })
+    if (/gemini-9\.0-flash-x:|gemini-8\.1-flash:|flash-latest:/.test(url)) return new Response(JSON.stringify({ error: { message: 'high demand' } }), { status: 503 })
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'OK' }] } }] }), { status: 200 })
+  }) as unknown as typeof fetch
+  const c = new GeminiClient({ connection: 'key', apiKey: 'k', proxyUrl: '', model: 'gemini-9.0-flash-x' }, fetcher, [0])
+  assert.equal(await c.generate({ system: 's', turns: [{ role: 'user', text: 'hi' }] }), 'OK')
+  assert.equal(c.model, 'gemini-2.5-flash')
+})
