@@ -1,6 +1,6 @@
 /* Mentor persistence in browser storage. Answers are stored apart from the workbook and obfuscated. */
 import type { WorkbookDoc } from '../model/types'
-import { BUILT_IN_PROXY, DEFAULT_MODEL } from './gemini'
+import { BUILT_IN_PROXY, DEFAULT_GROQ_MODEL, DEFAULT_MODEL } from './gemini'
 import type { LearnerState, MentorSession, MentorSettings, Profile, Target } from './types'
 
 export interface KV {
@@ -85,8 +85,8 @@ export class MentorStore {
   settings(): MentorSettings {
     const s = read<MentorSettings>(this.kv, 'settings')
     // "none" (the old built-in mentor) no longer exists: every session uses Gemini
-    const connection = s?.connection === 'proxy' || (!s?.connection && BUILT_IN_PROXY) ? 'proxy' : 'key'
-    return { connection, apiKey: s?.apiKey ?? '', proxyUrl: s?.proxyUrl ?? BUILT_IN_PROXY, model: s?.model || DEFAULT_MODEL }
+    const connection: MentorSettings['connection'] = s?.connection === 'groq' ? 'groq' : s?.connection === 'proxy' || (!s?.connection && BUILT_IN_PROXY) ? 'proxy' : 'key'
+    return { connection, apiKey: s?.apiKey ?? '', proxyUrl: s?.proxyUrl ?? BUILT_IN_PROXY, model: s?.model || DEFAULT_MODEL, groqKey: s?.groqKey ?? '', groqModel: s?.groqModel || DEFAULT_GROQ_MODEL }
   }
   saveSettings(s: MentorSettings) {
     this.kv.set(P + 'settings', JSON.stringify(s))

@@ -259,7 +259,7 @@ export function MentorHome({ store, onOpenDoc, onOpenWorkbook, workbookExists }:
       </a>
       <div className="ml-auto flex items-center gap-2">
         <button type="button" onClick={() => setSettingsOpen(true)} className={cn('rounded-full px-2.5 py-1 text-[11.5px]', client.available ? 'bg-[var(--active)] text-[var(--accent)]' : 'bg-[var(--warn-bg)] text-[var(--warn-text)]')} data-testid="connection-chip">
-          {client.available ? `Gemini: ${client.model}` : 'Gemini not connected'}
+          {client.available ? `${settings.connection === 'groq' ? 'Groq' : 'Gemini'}: ${client.model}` : 'AI not connected'}
         </button>
         <Button size="icon" aria-label="Mentor settings" tip="Mentor settings" onClick={() => setSettingsOpen(true)}><Icon name="settings" /></Button>
       </div>

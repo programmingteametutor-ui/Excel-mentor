@@ -2,7 +2,9 @@
 import type { MentorSettings } from './types'
 
 export const DEFAULT_MODEL = 'gemini-3.6-flash'
+export const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile'
 const API = 'https://generativelanguage.googleapis.com/v1beta'
+const GROQ_API = 'https://api.groq.com/openai/v1'
 
 declare const __MENTOR_PROXY__: string | undefined
 export const BUILT_IN_PROXY: string = typeof __MENTOR_PROXY__ === 'string' ? __MENTOR_PROXY__ : ''
@@ -56,12 +58,18 @@ export class GeminiClient {
     private retryDelays: number[] = [2000, 5000, 10000],
   ) {}
 
+  private get isGroq(): boolean {
+    return this.settings.connection === 'groq'
+  }
+
   get available(): boolean {
+    if (this.isGroq) return !!(this.settings.groqKey ?? '').trim()
     return (this.settings.connection === 'key' && !!this.settings.apiKey.trim()) || (this.settings.connection === 'proxy' && !!this.settings.proxyUrl.trim())
   }
 
   /** The chosen model (from settings). */
   get chosenModel(): string {
+    if (this.isGroq) return (this.settings.groqModel ?? '').trim() || DEFAULT_GROQ_MODEL
     return this.settings.model.trim() || DEFAULT_MODEL
   }
 
@@ -71,6 +79,7 @@ export class GeminiClient {
   }
 
   private endpoint(path: string): { url: string; headers: Record<string, string> } {
+    if (this.isGroq) return { url: `${GROQ_API}/${path}`, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${(this.settings.groqKey ?? '').trim()}` } }
     if (this.settings.connection === 'proxy') {
       const base = this.settings.proxyUrl.replace(/\/+$/, '')
       return { url: `${base}/${path}`, headers: { 'Content-Type': 'application/json' } }
@@ -79,7 +88,7 @@ export class GeminiClient {
   }
 
   private async post(path: string, body: unknown, opts: { signal?: AbortSignal; timeoutMs?: number }): Promise<unknown> {
-    if (!this.available) throw new GeminiError('The mentor is not connected to Gemini. Add an API key in Mentor settings.', 0, 'auth')
+    if (!this.available) throw new GeminiError('The mentor is not connected to an AI service. Add an API key in Mentor settings.', 0, 'auth')
     const { url, headers } = this.endpoint(path)
     const ctl = new AbortController()
     const timer = setTimeout(() => ctl.abort(), opts.timeoutMs ?? 60_000)
@@ -102,7 +111,7 @@ export class GeminiClient {
     if (!res.ok) {
       const msg = (json as { error?: { message?: string } } | null)?.error?.message ?? (text.slice(0, 200) || res.statusText)
       const google = ` (Google says: ${msg.slice(0, 220)})`
-      if (res.status === 400 && /api key/i.test(msg)) throw new GeminiError(`Gemini rejected the API key. Check you copied the whole key from aistudio.google.com/apikey.${google}`, 400, 'auth')
+      if (res.status === 400 && /api key/i.test(msg)) throw new GeminiError(`${this.isGroq ? 'Groq' : 'Gemini'} rejected the API key. Check you copied the whole key.${google}`, 400, 'auth')
       if (res.status === 401 || res.status === 403)
         throw new GeminiError(
           /referer|referrer|ip address|android|ios/i.test(msg)
@@ -113,10 +122,11 @@ export class GeminiClient {
           res.status,
           'auth',
         )
-      if (res.status === 404) throw new GeminiError(`The model “${this.model}” isn't available for this key. Click “Load models” in Mentor settings and pick one.${google}`, 404, 'model')
-      if (res.status === 429 && /high demand|overloaded|try again later/i.test(msg)) throw new GeminiError(`Gemini is overloaded right now.${google}`, 429, 'busy')
+      if (res.status === 404 || (this.isGroq && /model.*(not found|does not exist|decommissioned)/i.test(msg))) throw new GeminiError(`The model “${this.model}” isn't available for this key. Click “Load models” in Mentor settings and pick one.${google}`, 404, 'model')
+      // Groq limits requests per model per minute/day: treat that like "busy" so another model is tried
+      if (res.status === 429 && (this.isGroq || /high demand|overloaded|try again later/i.test(msg))) throw new GeminiError(`${this.isGroq ? 'Groq' : 'Gemini'} is overloaded or rate-limited right now.${google}`, 429, 'busy')
       if (res.status === 429) throw new GeminiError(`Gemini usage limit reached for this key. Wait a minute and try again.${google}`, 429, 'quota')
-      if ([500, 502, 503, 504].includes(res.status)) throw new GeminiError(`Gemini (${this.model}) is overloaded or temporarily unavailable.${google}`, res.status, 'busy')
+      if ([500, 502, 503, 504].includes(res.status)) throw new GeminiError(`${this.isGroq ? 'Groq' : 'Gemini'} (${this.model}) is overloaded or temporarily unavailable.${google}`, res.status, 'busy')
       throw new GeminiError(`Gemini error ${res.status}: ${msg}`, res.status, res.status === 400 ? 'format' : 'other')
     }
     return json
@@ -138,7 +148,13 @@ export class GeminiClient {
   private async fallbackCandidates(): Promise<string[]> {
     const skip = new Set([this.chosenModel, this.model])
     let listed: string[] = []
-    if (this.settings.connection === 'key') listed = await this.listModels().catch(() => [] as string[])
+    if (this.settings.connection === 'key' || this.isGroq) listed = await this.listModels().catch(() => [] as string[])
+    if (this.isGroq) {
+      // best general chat models first; each model has its own rate limit, so the next one is usually free
+      const pref = ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'meta-llama/llama-4-scout-17b-16e-instruct', 'qwen/qwen3-32b', 'llama-3.1-8b-instant']
+      const out = pref.filter((m) => !skip.has(m) && (!listed.length || listed.includes(m)))
+      return out.slice(0, 4)
+    }
     const usable = listed.filter((m) => !skip.has(m) && /^gemini-/.test(m) && !/image|tts|audio|live|embed|vision|exp|learnlm|nano|robotics|computer-use/i.test(m))
     const flash = (m: string) => /flash/.test(m) && !/lite/.test(m)
     const version = (m: string) => Number(/gemini-(\d+(?:\.\d+)?)/.exec(m)?.[1] ?? 0)
@@ -171,7 +187,7 @@ export class GeminiClient {
         const next = candidates.shift()
         if (!next) {
           busyFallback.delete(chosen)
-          throw new GeminiError(`Gemini is overloaded right now (high demand on ${chosen}${onFallback ? ' and the backup models' : ''}). This is on Google's side and usually passes within a few minutes — try again shortly, or pick an older model (for example gemini-flash-latest) in Mentor settings.`, lastBusy?.status ?? e.status, 'busy')
+          throw new GeminiError(this.isGroq ? `Groq is busy or rate-limited right now (${chosen}${onFallback ? ' and the backup models' : ''}). Wait a minute and try again, or pick another model in Mentor settings.` : `Gemini is overloaded right now (high demand on ${chosen}${onFallback ? ' and the backup models' : ''}). This is on Google's side and usually passes within a few minutes — try again shortly, or pick an older model (for example gemini-flash-latest) in Mentor settings.`, lastBusy?.status ?? e.status, 'busy')
         }
         busyFallback.set(chosen, { model: next, until: Date.now() + FALLBACK_TTL_MS })
         onFallback = true
@@ -179,7 +195,28 @@ export class GeminiClient {
     }
   }
 
+  /** Groq speaks the OpenAI chat format. JSON mode works on every model, so the schema goes into the prompt. */
+  private async generateGroq(o: GenerateOptions): Promise<string> {
+    const system = o.schema ? `${o.system}\n\nReply with ONLY a valid JSON object that matches this JSON schema (no markdown, no commentary):\n${JSON.stringify(o.schema)}` : o.system
+    const messages = [{ role: 'system', content: system }, ...o.turns.map((t) => ({ role: t.role === 'model' ? 'assistant' : 'user', content: t.text }))]
+    const attempts = o.schema ? [{ response_format: { type: 'json_object' } }, {}] : [{}]
+    let lastErr: unknown
+    for (const extra of attempts) {
+      try {
+        const json = (await this.post('chat/completions', { model: this.model, messages, temperature: 0.4, ...extra }, o)) as { choices?: { message?: { content?: string }; finish_reason?: string }[] }
+        const text = json?.choices?.[0]?.message?.content ?? ''
+        if (!text.trim()) throw new GeminiError('Groq returned an empty answer.', 200, 'other')
+        return text
+      } catch (e) {
+        lastErr = e
+        if (!(e instanceof GeminiError) || e.kind !== 'format') throw e
+      }
+    }
+    throw lastErr
+  }
+
   private async generateOnce(o: GenerateOptions): Promise<string> {
+    if (this.isGroq) return this.generateGroq(o)
     const contents = o.turns.map((t) => ({ role: t.role, parts: [{ text: t.text }] }))
     const base: Record<string, unknown> = { systemInstruction: { parts: [{ text: o.system }] }, contents }
     const attempts: Record<string, unknown>[] = o.schema
@@ -220,8 +257,12 @@ export class GeminiClient {
   /** Models that support generateContent (for the settings picker). */
   async listModels(): Promise<string[]> {
     if (!this.available) return []
-    const { url, headers } = this.endpoint('models?pageSize=200')
+    const { url, headers } = this.endpoint(this.isGroq ? 'models' : 'models?pageSize=200')
     const res = await this.fetcher(url, { headers })
+    if (this.isGroq && res.ok) {
+      const g = (await res.json()) as { data?: { id: string }[] }
+      return (g.data ?? []).map((m) => m.id).filter((n) => !/whisper|tts|guard|embed|orpheus|compound|prompt-guard|safeguard/i.test(n)).sort()
+    }
     if (!res.ok) throw new GeminiError(`Couldn't list models (${res.status}).`, res.status, res.status === 401 || res.status === 403 ? 'auth' : 'other')
     const json = (await res.json()) as { models?: { name: string; supportedGenerationMethods?: string[] }[] }
     return (json.models ?? [])
@@ -235,6 +276,12 @@ export class GeminiClient {
 interface GenerateResponse {
   candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[]
   promptFeedback?: { blockReason?: string }
+}
+
+/** The best Groq chat model in a list. */
+export function pickGroqModel(models: string[]): string | null {
+  const pref = ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'meta-llama/llama-4-scout-17b-16e-instruct', 'llama-3.1-8b-instant']
+  return pref.find((m) => models.includes(m)) ?? models[0] ?? null
 }
 
 /** The best general-purpose model in a list: newest "flash" first, skipping lite, image, audio, embedding and experimental variants. */

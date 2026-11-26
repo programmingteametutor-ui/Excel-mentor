@@ -339,3 +339,29 @@ test('if the first stand-in is also overloaded, the next one is tried', async ()
   assert.equal(await c.generate({ system: 's', turns: [{ role: 'user', text: 'hi' }] }), 'OK')
   assert.equal(c.model, 'gemini-2.5-flash')
 })
+
+test('Groq connection: OpenAI-style request, JSON mode with the schema in the prompt, rate limits fall back to another model', async () => {
+  const bodies: Record<string, unknown>[] = []
+  const headers: Record<string, string>[] = []
+  const fetcher = (async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'llama-3.3-70b-versatile' }, { id: 'openai/gpt-oss-120b' }, { id: 'whisper-large-v3' }] }), { status: 200 })
+    assert.ok(url.startsWith('https://api.groq.com/openai/v1/chat/completions'))
+    const body = JSON.parse(String(init?.body))
+    bodies.push(body)
+    headers.push(init?.headers as Record<string, string>)
+    if (body.model === 'llama-3.3-70b-versatile') return new Response(JSON.stringify({ error: { message: 'Rate limit reached' } }), { status: 429 })
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"a":1}' } }] }), { status: 200 })
+  }) as unknown as typeof fetch
+  const c = new GeminiClient({ connection: 'groq', apiKey: '', proxyUrl: '', model: '', groqKey: 'gsk_x', groqModel: '' }, fetcher, [0])
+  assert.equal(c.available, true)
+  const out = await c.generateJson<{ a: number }>({ system: 'sys', turns: [{ role: 'user', text: 'hi' }, { role: 'model', text: 'yo' }, { role: 'user', text: 'again' }], schema: { type: 'object', properties: { a: { type: 'number' } } } })
+  assert.deepEqual(out, { a: 1 })
+  assert.equal(c.model, 'openai/gpt-oss-120b')
+  const last = bodies[bodies.length - 1] as { messages: { role: string; content: string }[]; response_format: { type: string } }
+  assert.equal(last.response_format.type, 'json_object')
+  assert.equal(last.messages[0].role, 'system')
+  assert.match(last.messages[0].content, /JSON schema/)
+  assert.deepEqual(last.messages.map((m) => m.role), ['system', 'user', 'assistant', 'user'])
+  assert.equal(headers[0].Authorization, 'Bearer gsk_x')
+  assert.deepEqual(await c.listModels(), ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b'])
+})

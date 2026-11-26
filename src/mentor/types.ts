@@ -373,8 +373,11 @@ export interface LearnerState {
 }
 
 export interface MentorSettings {
-  connection: 'none' | 'key' | 'proxy'
+  connection: 'none' | 'key' | 'proxy' | 'groq'
   apiKey: string
   proxyUrl: string
   model: string
+  /** Groq (OpenAI-compatible) connection */
+  groqKey?: string
+  groqModel?: string
 }
