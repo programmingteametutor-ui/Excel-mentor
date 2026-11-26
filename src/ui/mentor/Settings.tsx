@@ -16,7 +16,11 @@ export function MentorSettingsDialog({ store, onClose, onSaved }: { store: Mento
     store.saveSettings(x)
     onSaved?.(x)
   }
-  const ping = (x: MentorSettings) => new GeminiClient(x).generate({ system: 'You are a connection test.', turns: [{ role: 'user', text: 'Reply with the single word OK.' }], timeoutMs: 30_000 })
+  const ping = async (x: MentorSettings) => {
+    const c = new GeminiClient(x)
+    const reply = await c.generate({ system: 'You are a connection test.', turns: [{ role: 'user', text: 'Reply with the single word OK.' }], timeoutMs: 30_000 })
+    return { reply, used: c.model }
+  }
   /** Tests the connection; if the model isn't available, switches to the best model the key can use. Saves on success. */
   const test = async () => {
     const cur = { ...s, apiKey: s.apiKey.trim(), proxyUrl: s.proxyUrl.trim() }
@@ -27,8 +31,9 @@ export function MentorSettingsDialog({ store, onClose, onSaved }: { store: Mento
     try {
       let x = cur
       let reply: string
+      let used = x.model
       try {
-        reply = await ping(x)
+        ;({ reply, used } = await ping(x))
       } catch (e) {
         if (!(e instanceof GeminiError) || e.kind !== 'model') throw e
         const list = await new GeminiClient(x).listModels()
@@ -36,11 +41,11 @@ export function MentorSettingsDialog({ store, onClose, onSaved }: { store: Mento
         const m = pickModel(list)
         if (!m) throw e
         x = { ...x, model: m }
-        reply = await ping(x)
+        ;({ reply, used } = await ping(x))
       }
       setS(x)
       save(x)
-      setStatus({ ok: true, text: `Connected and saved. Model: ${x.model}${x.model !== cur.model ? ` (“${cur.model}” isn't available for this key, so I switched)` : ''}. Gemini replied: “${reply.trim().slice(0, 40)}”.` })
+      setStatus({ ok: true, text: `Connected and saved. Model: ${x.model}${x.model !== cur.model ? ` (“${cur.model}” isn't available for this key, so I switched)` : ''}.${used !== x.model ? ` “${x.model}” is overloaded at the moment, so the mentor will use “${used}” until it recovers.` : ''} Gemini replied: “${reply.trim().slice(0, 40)}”.` })
     } catch (e) {
       setStatus({ ok: false, text: e instanceof GeminiError || e instanceof Error ? e.message : String(e) })
     } finally {
